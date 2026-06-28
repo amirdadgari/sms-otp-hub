@@ -43,5 +43,21 @@ db.exec(`
     received_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS webhook_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_slug TEXT NOT NULL DEFAULT '',
+    app_slug TEXT NOT NULL DEFAULT '',
+    status_code INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    sender TEXT NOT NULL DEFAULT '',
+    body_preview TEXT NOT NULL DEFAULT '',
+    content_type TEXT NOT NULL DEFAULT '',
+    auth_present INTEGER NOT NULL DEFAULT 0,
+    remote_ip TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE INDEX IF NOT EXISTS idx_codes_latest ON codes(client_id, app_id, id DESC);
+  CREATE INDEX IF NOT EXISTS idx_webhook_logs_latest ON webhook_logs(id DESC);
 `);

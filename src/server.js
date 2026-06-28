@@ -78,7 +78,13 @@ function getDashboardData() {
     ORDER BY codes.id DESC
     LIMIT 50
   `).all();
-  return { clients, apps, codes };
+  const webhookLogs = db.prepare(`
+    SELECT *
+    FROM webhook_logs
+    ORDER BY id DESC
+    LIMIT 100
+  `).all();
+  return { clients, apps, codes, webhookLogs };
 }
 
 function getBaseUrl(req) {
@@ -89,6 +95,43 @@ function maskToken(token) {
   const value = String(token || "");
   if (value.length <= 12) return value;
   return `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function getWebhookBody(req) {
+  return String(req.body?.body || req.body?.message || req.body?.text || req.body?.sms || JSON.stringify(req.body || {}));
+}
+
+function logWebhookCall(req, statusCode, outcome, detail = "", options = {}) {
+  const pathMatch = String(req.originalUrl || req.path || "").match(/\/api\/webhook\/([^/?#]+)\/([^/?#]+)/);
+  const clientSlug = req.params.clientSlug || pathMatch?.[1] || "";
+  const appSlug = req.params.appSlug || pathMatch?.[2] || "";
+  const sender = String(options.sender ?? req.body?.from ?? req.body?.sender ?? "").slice(0, 120);
+  const bodyPreview = String(options.body ?? getWebhookBody(req)).slice(0, 500);
+  db.prepare(`
+    INSERT INTO webhook_logs (
+      client_slug,
+      app_slug,
+      status_code,
+      outcome,
+      detail,
+      sender,
+      body_preview,
+      content_type,
+      auth_present,
+      remote_ip
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    String(clientSlug),
+    String(appSlug),
+    statusCode,
+    outcome,
+    String(detail || ""),
+    sender,
+    bodyPreview,
+    String(req.get("content-type") || ""),
+    extractBearer(req) ? 1 : 0,
+    String(req.ip || req.socket?.remoteAddress || "")
+  );
 }
 
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -161,27 +204,32 @@ app.post("/api/webhook/:clientSlug/:appSlug", (req, res) => {
   const client = db.prepare("SELECT * FROM clients WHERE slug = ?").get(req.params.clientSlug);
   if (!client || !timingSafeEqualText(extractBearer(req), client.ingest_token)) {
     console.warn("webhook unauthorized", requestMeta);
+    logWebhookCall(req, 401, "unauthorized", client ? "Invalid ingest token" : "Client slug not found");
     return res.status(401).json({ error: "unauthorized" });
   }
 
   const appRow = db.prepare("SELECT * FROM apps WHERE client_id = ? AND slug = ?").get(client.id, req.params.appSlug);
   if (!appRow) {
     console.warn("webhook app_not_found", requestMeta);
+    logWebhookCall(req, 404, "app_not_found", "App slug not found for client");
     return res.status(404).json({ error: "app_not_found" });
   }
 
   const sender = String(req.body.from || req.body.sender || "");
-  const body = String(req.body.body || req.body.message || req.body.text || req.body.sms || JSON.stringify(req.body));
+  const body = getWebhookBody(req);
   if (appRow.sender_match && !sender.toLowerCase().includes(appRow.sender_match.toLowerCase())) {
     console.info("webhook ignored sender_mismatch", { ...requestMeta, sender, senderMatch: appRow.sender_match });
+    logWebhookCall(req, 202, "sender_mismatch", `Expected sender containing "${appRow.sender_match}"`, { sender, body });
     return res.status(202).json({ ok: true, ignored: "sender_mismatch" });
   }
 
   let regex;
+  let regexDetail = "";
   try {
     regex = new RegExp(appRow.code_regex);
   } catch {
     regex = /(?<!\d)(\d{6})(?!\d)/;
+    regexDetail = `Invalid app regex "${appRow.code_regex}", used default 6-digit regex`;
   }
   const match = body.match(regex);
   const code = match?.[1] || match?.[0];
@@ -191,13 +239,24 @@ app.post("/api/webhook/:clientSlug/:appSlug", (req, res) => {
       bodyPreview: body.slice(0, 240),
       regex: appRow.code_regex
     });
+    logWebhookCall(req, 422, "no_code_found", regexDetail || `No match for regex "${appRow.code_regex}"`, { sender, body });
     return res.status(422).json({ error: "no_code_found" });
   }
 
   db.prepare("INSERT INTO codes (client_id, app_id, code, sender, body) VALUES (?, ?, ?, ?, ?)")
     .run(client.id, appRow.id, code, sender, body);
   console.info("webhook code_stored", { ...requestMeta, code, sender });
+  logWebhookCall(req, 200, "code_stored", `Stored code ${code}`, { sender, body });
   res.json({ ok: true });
+});
+
+app.use((err, req, res, next) => {
+  if (String(req.originalUrl || "").startsWith("/api/webhook/")) {
+    console.warn("webhook invalid_request", { path: req.originalUrl, error: err.message });
+    logWebhookCall(req, err.status || 400, "invalid_request", err.message);
+    return res.status(err.status || 400).json({ error: "invalid_request" });
+  }
+  next(err);
 });
 
 app.get("/api/latest/:clientSlug/:appSlug", (req, res) => {
@@ -285,12 +344,14 @@ const views = {
       </form>
     </section>
   `,
-  dashboard: ({ clients, apps, codes, baseUrl }) => `
+  dashboard: ({ clients, apps, codes, webhookLogs, baseUrl }) => `
     <section class="tabs-shell">
       <div class="tabs" role="tablist" aria-label="Dashboard sections">
         <button class="tab active" type="button" role="tab" aria-selected="true" data-tab-target="messages">Recent messages</button>
         <button class="tab" type="button" role="tab" aria-selected="false" data-tab-target="apps">Apps</button>
         <button class="tab" type="button" role="tab" aria-selected="false" data-tab-target="clients">Clients</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab-target="help">Help</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab-target="logs">Logs</button>
       </div>
 
       <div class="panel" data-tab-panel="messages">
@@ -326,21 +387,6 @@ const views = {
           <input name="ttl_seconds" type="number" min="30" max="86400" value="600">
           <button class="primary" type="submit">Add app</button>
         </form>
-        <div class="help-section">
-          <h2>Webhook format</h2>
-          <div class="help-grid">
-            <div>
-              <h3>Headers</h3>
-              <code>Authorization: Bearer {client ingest token}</code>
-              <code>Content-Type: application/json</code>
-            </div>
-            <div>
-              <h3>Body</h3>
-              <code>{"from":"Bank","body":"Your code is 123456"}</code>
-              <p>Accepted message keys: <code>body</code>, <code>message</code>, <code>text</code>, or <code>sms</code>. Accepted sender keys: <code>from</code> or <code>sender</code>.</p>
-            </div>
-          </div>
-        </div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Client</th><th>App</th><th>Webhook</th><th>Latest API</th><th></th></tr></thead>
@@ -378,6 +424,59 @@ const views = {
                 <td><div class="copy-row"><span class="token-mask">${escapeHtml(maskToken(client.read_token))}</span><button class="copy" type="button" data-copy="${escapeHtml(client.read_token)}">Copy</button></div></td>
                 <td><form method="post" action="/clients/${client.id}/delete"><button class="danger" type="submit">Delete</button></form></td>
               </tr>`).join("") || '<tr><td colspan="5">No clients yet.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel" data-tab-panel="help" hidden>
+        <h1>Help</h1>
+        <div class="help-section flush">
+          <h2>Webhook format</h2>
+          <div class="help-grid">
+            <div>
+              <h3>Headers</h3>
+              <code>Authorization: Bearer {client ingest token}</code>
+              <code>Content-Type: application/json</code>
+            </div>
+            <div>
+              <h3>Body</h3>
+              <code>{"from":"Bank","body":"Your code is 123456"}</code>
+              <p>Accepted message keys: <code>body</code>, <code>message</code>, <code>text</code>, or <code>sms</code>. Accepted sender keys: <code>from</code> or <code>sender</code>.</p>
+            </div>
+          </div>
+        </div>
+        <div class="help-section flush">
+          <h2>Latest-code API</h2>
+          <div class="help-grid">
+            <div>
+              <h3>Headers</h3>
+              <code>Authorization: Bearer {client read token}</code>
+            </div>
+            <div>
+              <h3>Response</h3>
+              <code>{"code":"123456","client":"home","app":"bank","receivedAt":"2026-06-28T19:55:40.000Z"}</code>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" data-tab-panel="logs" hidden>
+        <h1>Webhook logs</h1>
+        <div class="table-wrap">
+          <table class="logs-table">
+            <thead><tr><th>Received</th><th>Status</th><th>Outcome</th><th>Client</th><th>App</th><th>Sender</th><th>Detail</th><th>Body preview</th><th>Auth</th></tr></thead>
+            <tbody>${webhookLogs.map((log) => `
+              <tr>
+                <td>${escapeHtml(formatDate(log.created_at))}</td>
+                <td><span class="status ${log.status_code >= 400 ? "bad" : "ok"}">${escapeHtml(log.status_code)}</span></td>
+                <td><code>${escapeHtml(log.outcome)}</code></td>
+                <td><code>${escapeHtml(log.client_slug)}</code></td>
+                <td><code>${escapeHtml(log.app_slug)}</code></td>
+                <td class="truncate small">${escapeHtml(log.sender)}</td>
+                <td class="truncate">${escapeHtml(log.detail)}</td>
+                <td class="truncate">${escapeHtml(log.body_preview)}</td>
+                <td>${log.auth_present ? "Yes" : "No"}</td>
+              </tr>`).join("") || '<tr><td colspan="9">No webhook calls logged yet.</td></tr>'}</tbody>
           </table>
         </div>
       </div>

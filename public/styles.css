@@ -45,6 +45,7 @@ main { padding: 24px; }
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   border-bottom: 1px solid var(--line);
 }
@@ -146,6 +147,10 @@ button {
   background: #fbfcfe;
 }
 
+.help-section.flush:last-child {
+  margin-bottom: 0;
+}
+
 h2 {
   margin: 0 0 10px;
   font-size: 16px;
@@ -188,6 +193,10 @@ table {
   width: 100%;
   border-collapse: collapse;
   min-width: 760px;
+}
+
+.logs-table {
+  min-width: 1120px;
 }
 
 th, td {
@@ -240,6 +249,30 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.truncate.small {
+  max-width: 160px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.status.ok {
+  color: #067647;
+  background: #ecfdf3;
+}
+
+.status.bad {
+  color: var(--danger);
+  background: #fff1f0;
 }
 
 .alert {
