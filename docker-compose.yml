@@ -1,0 +1,11 @@
+services:
+  sms-otp-hub:
+    build: .
+    container_name: sms-otp-hub
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
