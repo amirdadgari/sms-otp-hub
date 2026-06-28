@@ -93,17 +93,6 @@ Response:
 {"code":"123456","client":"home","app":"bank","receivedAt":"2026-06-28T19:55:40.000Z"}
 ```
 
-## GitHub Notes
-
-Do not commit `.env`, `data/`, or `node_modules/`. They are ignored by default.
-
-Before pushing:
-
-```sh
-npm run check
-git status
-```
-
 ## License
 
 MIT
