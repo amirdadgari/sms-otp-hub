@@ -6,12 +6,13 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "test": "node --experimental-sqlite --test",
     "check": "node --experimental-sqlite --check src/server.js",
     "start": "node --experimental-sqlite src/server.js",
     "dev": "node --watch --experimental-sqlite src/server.js"
   },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "5.3.0"
   },
   "engines": {
     "node": ">=24"
